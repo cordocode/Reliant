@@ -26,6 +26,16 @@ def format_name(name):
     name_parts = name.strip().split()
     return ' '.join(part.upper() for part in name_parts)
 
+def get_last_row(service):
+    """Find the last row with data in column B (vendor names)."""
+    result = service.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f'{SHEET_NAME}!B:B'
+    ).execute()
+    
+    values = result.get('values', [])
+    return len(values)  # This will give us the last row number
+
 def update_names():
     """Read, format, and update names in column C."""
     try:
@@ -33,8 +43,11 @@ def update_names():
             SERVICE_ACCOUNT_FILE, scopes=SCOPES)
         service = build('sheets', 'v4', credentials=credentials)
         
+        # Get the last row dynamically
+        last_row = get_last_row(service)
+        range_name = f'{SHEET_NAME}!C2:C{last_row}'
+        
         # Get existing values
-        range_name = f'{SHEET_NAME}!{RANGE}'
         result = service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID,
             range=range_name
