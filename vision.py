@@ -102,7 +102,12 @@ def extract_names(document):
                 if (LEFT_PCT <= text_left_pct <= RIGHT_PCT and 
                     LEFT_PCT <= text_right_pct <= RIGHT_PCT):
                     
-                    text = ''.join([''.join([s.text for s in w.symbols]) for w in paragraph.words]).strip()
+                    # Modified text extraction to preserve spaces
+                    words = []
+                    for word in paragraph.words:
+                        word_text = ''.join([symbol.text for symbol in word.symbols])
+                        words.append(word_text)
+                    text = ' '.join(words).strip()
                     
                     if (text and 
                         not text.upper() == 'NAME' and
