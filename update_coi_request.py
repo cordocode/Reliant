@@ -14,7 +14,7 @@ TEST_VENDOR = "Reliant Test Account"
 
 # Constants
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-SERVICE_ACCOUNT_FILE = 'sheets_key.json'
+SERVICE_ACCOUNT_FILE = '/Users/cordo/Documents/RELIANT_SCRIPTS/email_key.json'  # Updated to absolute path
 SPREADSHEET_ID = '19PKId-MCbmA1iG_DwbXqwR-LbQy2b6YBAh-yyMtLI-s'
 SHEET_NAME = 'VENDORS'
 
