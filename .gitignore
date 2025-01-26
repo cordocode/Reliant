@@ -1,0 +1,16 @@
+# Environment variables
+.env
+
+# Google API credentials
+*.key.json
+*_key.json
+excel-extractor-*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
