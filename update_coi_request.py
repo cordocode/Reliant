@@ -3,13 +3,62 @@ from googleapiclient.discovery import build
 from datetime import datetime, date
 import calendar
 import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from dotenv import load_dotenv
+
+# Test Mode Configuration
+TEST_MODE = True  # Set to False for production
+TEST_VENDOR = "Reliant Test Account"
 
 # Constants
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
 SERVICE_ACCOUNT_FILE = 'sheets_key.json'
 SPREADSHEET_ID = '19PKId-MCbmA1iG_DwbXqwR-LbQy2b6YBAh-yyMtLI-s'
 SHEET_NAME = 'VENDORS'
-TEMPLATE_FILE = 'email_templates.txt'
+
+# Load environment variables
+load_dotenv()
+SENDER_EMAIL = os.getenv('sender_email')
+APP_PASSWORD = os.getenv('app_password')
+
+# Email Templates and COI Information
+EMAIL_SUBJECT = "Request for updated Certificate of Insurance"
+
+EMAIL_BODY_TEMPLATE = """Dear {vendor_name},
+
+Our records indicate that your Certificate of Insurance (COI) expired on {expiration_date}. 
+Could you please send an updated COI to this email at your earliest convenience?
+
+For your updated COI, kindly ensure the following text is included:
+
+Insured and Additionally Insured:
+Reliant Property Management P.O. BOX 1630, Arvada, Colorado as Certificate Holder
+{property_code_COI_TEMPALTE}
+
+Thanks in advance for taking care of this!
+
+Best regards,
+Reliant Property Management"""
+
+# COI Information by Property Code
+COI_TEMPLATES = {
+    "100/101/102/104": """
+Flocchini-Magnolia Associates LLC as Additionally Insured
+Jeanine Landsinger GST Trust as Additionally Insured
+4997 Longley Lane Associates as Additionally Insured""",
+
+    "109": """
+Flocchini Associates LLC as Additionally Insured""",
+
+    "111/113": """
+South Federal Park and Green Street Associates, TIC as Additionally Insured
+South Federal Park Associates as Additionally Insured""",
+
+    "105/106/107": """
+Flocchini Family Holdings Orem as Additionally Insured"""
+}
 
 # Create a class to hold entry data
 class VendorEntry:
@@ -98,6 +147,10 @@ def get_expired_dates():
             vendor = vendor_row[0] if vendor_row else 'N/A'
             email = email_row[0] if email_row else 'N/A'
             
+            # Skip non-test vendors when in test mode
+            if TEST_MODE and vendor.strip() != TEST_VENDOR:
+                continue
+                
             date_obj, formatted_date = format_date(date_str)
             
             if date_obj and date_obj < today:
@@ -116,95 +169,120 @@ def get_expired_dates():
         print(f'Error: {e}')
         return []
 
-def load_email_templates():
-    """Load email templates and COI information."""
-    templates = {}
-    try:
-        with open(TEMPLATE_FILE, 'r') as f:
-            content = f.read()
-            
-        # Parse the template file
-        sections = content.split('\n\n')
-        for section in sections:
-            if '=' in section:
-                key, template = section.split('=', 1)
-                templates[key.strip()] = template.strip()
-    except Exception as e:
-        print(f"Error loading templates: {e}")
-    
-    return templates
-
 def get_coi_information(property_code):
     """Get the correct COI information based on property code."""
-    templates = load_email_templates()
-    
     if property_code.startswith(('100', '101', '102', '104')):
-        return templates.get('100/101/102/104_INFORMATION', '')
+        return COI_TEMPLATES.get('100/101/102/104', '')
     elif property_code.startswith('109'):
-        return templates.get('109_COI_INFORMATION', '')
+        return COI_TEMPLATES.get('109', '')
     elif property_code.startswith(('111', '113')):
-        return templates.get('111/113_COI_INFORMATION', '')
+        return COI_TEMPLATES.get('111/113', '')
     elif property_code.startswith(('105', '106', '107')):
-        return templates.get('105/106/107_COI_INFORMATION', '')
+        return COI_TEMPLATES.get('105/106/107', '')
     return ''
-
-# Add EMAIL_BODY template directly in the code
-EMAIL_BODY_TEMPLATE = """Dear {vendor_name},
-
-Our records indicate that your Certificate of Insurance (COI) expired on {expiration_date}. 
-Could you please send an updated COI to this email at your earliest convenience?
-
-For your updated COI, kindly ensure the following text is included:
-
-Insured and Additionally Insured:
-Reliant Property Management P.O. BOX 1630, Arvada, Colorado as Certificate Holder
-{property_code_COI_TEMPALTE}
-
-Thanks in advance for taking care of this!
-
-Best regards,
-Reliant Property Management"""
 
 def format_email_content(entry):
     """Format email content for a vendor."""
     try:
-        templates = load_email_templates()
         coi_info = get_coi_information(entry.code)
         
-        # Use the direct template instead of loading from file
         email_body = EMAIL_BODY_TEMPLATE.format(
             vendor_name=entry.vendor_name,
             expiration_date=entry.formatted_date,
             property_code_COI_TEMPALTE=coi_info
         )
         
-        subject = templates.get('COI_SUBJECT_TEMPLATE', 'COI Update Required')
-        
-        return subject, email_body
+        return EMAIL_SUBJECT, email_body
     except Exception as e:
         print(f"Error formatting email: {e}")
         return "Error in subject", "Error in email body"
 
+def send_email(to_email, subject, body):
+    """Send email using SMTP."""
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = SENDER_EMAIL
+        msg['To'] = to_email
+        msg['Subject'] = subject
+
+        msg.attach(MIMEText(body, 'plain'))
+
+        # Setup SMTP server connection
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(SENDER_EMAIL, APP_PASSWORD)
+        
+        # Send email
+        text = msg.as_string()
+        server.sendmail(SENDER_EMAIL, to_email, text)
+        server.quit()
+        return True
+    except Exception as e:
+        print(f"Error sending email: {e}")
+        return False
+
+def print_expired_summary(entries):
+    """Print a concise summary of expired entries."""
+    print("\nVendors with Expired COIs:")
+    print("==========================")
+    for entry in entries:
+        print(f"{entry.vendor_name} - Expired: {entry.formatted_date}")
+
+def get_user_confirmation(count):
+    """Get user confirmation before sending emails."""
+    while True:
+        response = input(f"\nWould you like to proceed with sending {count} emails? (y/n): ").lower()
+        if response in ['y', 'n']:
+            return response == 'y'
+        print("Please enter 'y' for yes or 'n' for no.")
+
 def main():
-    print("Checking for expired dates and corresponding information...")
+    if TEST_MODE:
+        print("\n*** TEST MODE ENABLED - Only processing test vendor ***")
+        print(f"Test Vendor: {TEST_VENDOR}\n")
+    
+    print("Checking for expired COIs...")
     expired_entries = get_expired_dates()
     
+    # Initialize statistics
+    total_expired = len(expired_entries)
+    emails_sent = 0
+    failed_emails = []
+    
     if expired_entries:
-        print(f"\nFound {len(expired_entries)} expired entries.")
-        print("\nEmail Preview for each entry:")
-        print("==============================")
+        # Print concise summary
+        print_expired_summary(expired_entries)
+        print(f"\nTotal Expired COIs: {total_expired}")
         
-        for entry in expired_entries:
-            subject, email_body = format_email_content(entry)
-            print(f"\nTo: {entry.email}")
-            print(f"Subject: {subject}")
-            print("Body:")
-            print("-" * 50)
-            print(email_body)
-            print("-" * 50)
-            print("\n")
+        # Get user confirmation
+        if get_user_confirmation(total_expired):
+            print("\nProcessing Emails...")
+            
+            for entry in expired_entries:
+                try:
+                    subject, email_body = format_email_content(entry)
+                    if send_email(entry.email, subject, email_body):
+                        emails_sent += 1
+                        print(f"✓ Sent to {entry.vendor_name}")
+                    else:
+                        failed_emails.append(f"{entry.vendor_name} ({entry.email})")
+                        print(f"✗ Failed: {entry.vendor_name}")
+                except Exception as e:
+                    failed_emails.append(f"{entry.vendor_name} ({entry.email}): {str(e)}")
+                    print(f"✗ Error: {entry.vendor_name}")
+            
+            # Print final statistics
+            print("\nEmail Processing Complete")
+            print("========================")
+            print(f"Successfully Sent: {emails_sent}")
+            if failed_emails:
+                print(f"\nFailed Emails ({len(failed_emails)}):")
+                for failure in failed_emails:
+                    print(f"- {failure}")
+        else:
+            print("\nOperation cancelled by user.")
     else:
-        print("\nNo expired dates found")
+        print("\nNo expired COIs found.")
 
 if __name__ == '__main__':
     main()
