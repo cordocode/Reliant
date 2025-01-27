@@ -17,18 +17,25 @@ SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
 SPREADSHEET_ID = '19PKId-MCbmA1iG_DwbXqwR-LbQy2b6YBAh-yyMtLI-s'
 SERVICE_ACCOUNT_FILE = '/Users/cordo/Documents/RELIANT_SCRIPTS/email_key.json'
 
-# Add this near the top with other constants
-DOWNLOADS_FOLDER = os.path.join(os.path.expanduser('~'), 'Downloads')
+# Replace DOWNLOADS_FOLDER constant with COIS_FOLDER
+COIS_FOLDER = os.path.join(os.path.expanduser('~'), 'Downloads', 'COIS')
+
+# Add function to ensure COIS folder exists
+def ensure_cois_folder():
+    """Create COIS folder if it doesn't exist"""
+    if not os.path.exists(COIS_FOLDER):
+        os.makedirs(COIS_FOLDER)
+        print(f"Created COIS folder at {COIS_FOLDER}")
 
 def get_vendor_details(email_address):
-    """Get vendor name and expiration date from spreadsheet using email"""
+    """Get vendor name from spreadsheet using email"""
     try:
         credentials = service_account.Credentials.from_service_account_file(
             SERVICE_ACCOUNT_FILE, scopes=SCOPES)
         service = build('sheets', 'v4', credentials=credentials)
         
         # Get all relevant columns
-        range_name = 'VENDORS!B2:G'  # Includes vendor name (B) and expiration date (G)
+        range_name = 'VENDORS!B2:E'  # Only need vendor name (B) and email (E)
         result = service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID,
             range=range_name
@@ -37,10 +44,9 @@ def get_vendor_details(email_address):
         values = result.get('values', [])
         # Find row with matching email (column E, index 3)
         for row in values:
-            if len(row) > 4 and row[3].lower().strip() == email_address.lower().strip():
+            if len(row) > 3 and row[3].lower().strip() == email_address.lower().strip():
                 vendor_name = row[0]  # Column B
-                exp_date = row[5] if len(row) > 5 else None  # Column G
-                return vendor_name, exp_date
+                return vendor_name, None
         return None, None
     except Exception as e:
         print(f"Error fetching vendor details: {e}")
@@ -49,19 +55,6 @@ def get_vendor_details(email_address):
 def format_vendor_name(name):
     """Convert vendor name to uppercase with underscores"""
     return name.strip().upper().replace(' ', '_')
-
-def get_next_year_expiration(exp_date):
-    """Convert MMDDYY to next year's date"""
-    try:
-        # Parse the date
-        date_obj = datetime.strptime(exp_date, '%m%d%y')
-        # Add one year
-        next_year = date_obj.year + 1
-        # Format back to MMDDYY, ensuring year is two digits
-        return date_obj.strftime(f'%m%d{str(next_year)[-2:]}')
-    except Exception as e:
-        print(f"Error processing expiration date: {e}")
-        return exp_date
 
 def save_pdf_attachment(part, sender_email):
     """Save PDF attachment with new naming convention"""
@@ -75,16 +68,15 @@ def save_pdf_attachment(part, sender_email):
             return None
             
         # Get vendor details
-        vendor_name, exp_date = get_vendor_details(sender_email)
-        if not vendor_name or not exp_date:
+        vendor_name, _ = get_vendor_details(sender_email)
+        if not vendor_name:
             print(f"Could not find vendor details for {sender_email}")
             return None
             
-        # Create filename
+        # Create filename - simplified version
         formatted_name = format_vendor_name(vendor_name)
-        next_exp = get_next_year_expiration(exp_date)
-        new_filename = f"COI_{formatted_name}_{next_exp}.pdf"
-        filepath = os.path.join(DOWNLOADS_FOLDER, new_filename)
+        new_filename = f"COI_{formatted_name}.pdf"
+        filepath = os.path.join(COIS_FOLDER, new_filename)
         
         # Save file
         content = part.get_payload(decode=True)
@@ -204,6 +196,9 @@ def process_email(msg, email_id, imap):
 
 def scan_inbox():
     try:
+        # Ensure COIS folder exists before processing
+        ensure_cois_folder()
+        
         vendor_emails = get_vendor_emails()
         print(f"Loaded {len(vendor_emails)} vendor emails from spreadsheet")
 

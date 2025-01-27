@@ -9,7 +9,7 @@ from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 
 # Test Mode Configuration
-TEST_MODE = True  # Set to False for production
+TEST_MODE = False  # Set to False for production
 TEST_VENDOR = "Reliant Test Account"
 
 # Constants

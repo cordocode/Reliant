@@ -154,6 +154,31 @@ def extract_dates_from_text(text):
     
     return latest_date
 
+def rename_file_with_date(pdf_file, extracted_date):
+    """Rename the PDF file to include the extracted date"""
+    try:
+        old_path = os.path.join(COIS_FOLDER, pdf_file)
+        
+        # Get the current name without extension
+        base_name = os.path.splitext(pdf_file)[0]
+        
+        # Format date for filename (MMDDYY)
+        date_str = datetime.strptime(extracted_date, '%m/%d/%Y').strftime('%m%d%y')
+        
+        # Only add date if filename starts with COI_
+        if base_name.startswith('COI_'):
+            new_filename = f"{base_name}_{date_str}.pdf"
+            new_path = os.path.join(COIS_FOLDER, new_filename)
+            
+            # Rename file
+            os.rename(old_path, new_path)
+            print(f"✓ Renamed file to: {new_filename}")
+            return new_filename
+        return pdf_file
+    except Exception as e:
+        print(f"Error renaming file: {e}")
+        return pdf_file
+
 def process_single_pdf(pdf_file):
     """Process a single PDF"""
     try:
@@ -183,12 +208,15 @@ def process_single_pdf(pdf_file):
                 updated_coi_date = extract_dates_from_text(extracted_text.strip())
                 
                 if updated_coi_date:
-                    return updated_coi_date.strftime('%m/%d/%Y')
+                    date_str = updated_coi_date.strftime('%m/%d/%Y')
+                    rename_file_with_date(pdf_file, date_str)
+                    return date_str
                 return None
             except TimeoutError:
                 return None
                 
     except Exception as e:
+        print(f"Error processing PDF: {e}")
         return None
 
 def process_pdfs():
@@ -197,16 +225,23 @@ def process_pdfs():
     if not pdf_files:
         return
     
+    results = []
     # Process files one at a time with timeouts
     for pdf_file in pdf_files:
         try:
             updated_coi_date = process_single_pdf(pdf_file)
             if updated_coi_date:
-                print(updated_coi_date)
+                results.append((pdf_file, updated_coi_date))
+                print(f"Processed {pdf_file}: {updated_coi_date}")
         except KeyboardInterrupt:
             sys.exit(0)
-        except Exception:
+        except Exception as e:
+            print(f"Error processing {pdf_file}: {e}")
             continue
+    
+    print("\nProcessing Summary:")
+    for filename, date in results:
+        print(f"- {filename}: {date}")
 
 def main():
     print("Starting COI text extraction...")
