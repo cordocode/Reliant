@@ -4,6 +4,10 @@
 # Google API credentials
 *.key.json
 *_key.json
+vision_key_new.json
+sheets_key.json
+drive_key.json
+email_key.json
 excel-extractor-*.json
 
 # Python
