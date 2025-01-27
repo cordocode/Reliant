@@ -34,7 +34,7 @@ Could you please send an updated COI to this email at your earliest convenience?
 For your updated COI, kindly ensure the following text is included:
 
 Insured and Additionally Insured:
-Reliant Property Management P.O. BOX 1630, Arvada, Colorado as Certificate Holder
+Reliant Property Management P.O. BOX 1630, Arvada, 80001 Colorado as Certificate Holder
 {property_code_COI_TEMPALTE}
 
 Thanks in advance for taking care of this!
@@ -236,53 +236,129 @@ def get_user_confirmation(count):
             return response == 'y'
         print("Please enter 'y' for yes or 'n' for no.")
 
+def get_mode_selection():
+    """Get user selection for automatic or manual mode"""
+    while True:
+        print("\nSelect Mode:")
+        print("1. Automatic (process all expired COIs)")
+        print("2. Manual (select specific vendors)")
+        choice = input("Enter choice (1 or 2): ").strip()
+        if choice in ['1', '2']:
+            return choice == '2'  # Returns True for manual mode
+        print("Invalid choice. Please enter 1 or 2.")
+
+def get_manual_emails():
+    """Get list of email addresses from user input"""
+    print("\nEnter email addresses (one per line)")
+    print("Press Enter twice when finished")
+    emails = []
+    while True:
+        email = input().strip().lower()
+        if not email:
+            if emails:  # Only break if we have at least one email
+                break
+            print("Please enter at least one email address.")
+            continue
+        emails.append(email)
+    return emails
+
+def get_vendor_entry(email, service):
+    """Get vendor entry for a specific email"""
+    try:
+        # Get all relevant columns
+        range_name = f'{SHEET_NAME}!A2:G'  # Include all needed columns
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range=range_name
+        ).execute()
+        
+        values = result.get('values', [])
+        for i, row in enumerate(values, 2):
+            if len(row) > 4 and row[4].lower().strip() == email.lower().strip():
+                return VendorEntry(
+                    row=i,
+                    code=row[0],
+                    vendor_name=row[1],
+                    email=row[4],
+                    exp_date=row[6] if len(row) > 6 else None,
+                    formatted_date=format_date(row[6] if len(row) > 6 else None)[1]
+                )
+        return None
+    except Exception as e:
+        print(f"Error fetching vendor details for {email}: {e}")
+        return None
+
 def main():
     if TEST_MODE:
         print("\n*** TEST MODE ENABLED - Only processing test vendor ***")
         print(f"Test Vendor: {TEST_VENDOR}\n")
     
-    print("Checking for expired COIs...")
-    expired_entries = get_expired_dates()
+    # Get mode selection
+    manual_mode = get_mode_selection()
     
-    # Initialize statistics
-    total_expired = len(expired_entries)
-    emails_sent = 0
-    failed_emails = []
-    
-    if expired_entries:
-        # Print concise summary
-        print_expired_summary(expired_entries)
-        print(f"\nTotal Expired COIs: {total_expired}")
+    try:
+        credentials = service_account.Credentials.from_service_account_file(
+            SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+        service = build('sheets', 'v4', credentials=credentials)
         
-        # Get user confirmation
-        if get_user_confirmation(total_expired):
-            print("\nProcessing Emails...")
+        if manual_mode:
+            print("\nManual Mode Selected")
+            emails = get_manual_emails()
+            expired_entries = []
             
-            for entry in expired_entries:
-                try:
-                    subject, email_body = format_email_content(entry)
-                    if send_email(entry.email, subject, email_body):
-                        emails_sent += 1
-                        print(f"✓ Sent to {entry.vendor_name}")
-                    else:
-                        failed_emails.append(f"{entry.vendor_name} ({entry.email})")
-                        print(f"✗ Failed: {entry.vendor_name}")
-                except Exception as e:
-                    failed_emails.append(f"{entry.vendor_name} ({entry.email}): {str(e)}")
-                    print(f"✗ Error: {entry.vendor_name}")
-            
-            # Print final statistics
-            print("\nEmail Processing Complete")
-            print("========================")
-            print(f"Successfully Sent: {emails_sent}")
-            if failed_emails:
-                print(f"\nFailed Emails ({len(failed_emails)}):")
-                for failure in failed_emails:
-                    print(f"- {failure}")
+            for email in emails:
+                entry = get_vendor_entry(email, service)
+                if entry:
+                    expired_entries.append(entry)
+                    print(f"Found vendor: {entry.vendor_name}")
+                else:
+                    print(f"❌ Could not find vendor for email: {email}")
         else:
-            print("\nOperation cancelled by user.")
-    else:
-        print("\nNo expired COIs found.")
+            print("\nAutomatic Mode Selected")
+            expired_entries = get_expired_dates()
+    
+        # Initialize statistics
+        total_to_process = len(expired_entries)
+        emails_sent = 0
+        failed_emails = []
+        
+        if expired_entries:
+            # Print concise summary
+            print_expired_summary(expired_entries)
+            print(f"\nTotal COIs to process: {total_to_process}")
+            
+            # Get user confirmation
+            if get_user_confirmation(total_to_process):
+                print("\nProcessing Emails...")
+                
+                for entry in expired_entries:
+                    try:
+                        subject, email_body = format_email_content(entry)
+                        if send_email(entry.email, subject, email_body):
+                            emails_sent += 1
+                            print(f"✓ Sent to {entry.vendor_name}")
+                        else:
+                            failed_emails.append(f"{entry.vendor_name} ({entry.email})")
+                            print(f"✗ Failed: {entry.vendor_name}")
+                    except Exception as e:
+                        failed_emails.append(f"{entry.vendor_name} ({entry.email}): {str(e)}")
+                        print(f"✗ Error: {entry.vendor_name}")
+                
+                # Print final statistics
+                print("\nEmail Processing Complete")
+                print("========================")
+                print(f"Successfully Sent: {emails_sent}")
+                if failed_emails:
+                    print(f"\nFailed Emails ({len(failed_emails)}):")
+                    for failure in failed_emails:
+                        print(f"- {failure}")
+            else:
+                print("\nOperation cancelled by user.")
+        else:
+            print("\nNo vendors found to process.")
+            
+    except Exception as e:
+        print(f"An error occurred: {e}")
 
 if __name__ == '__main__':
     main()
