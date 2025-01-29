@@ -13,15 +13,36 @@ import multiprocessing
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import sys
 import threading
+from openai import OpenAI
+from dotenv import load_dotenv
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+
+# Load environment variables at the start
+load_dotenv()
 
 # Constants
 COIS_FOLDER = '/Users/cordo/Downloads/COIS'
 # Update to use new vision key file
 VISION_CREDENTIALS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vision_key_new.json')
+SPREADSHEET_ID = '19PKId-MCbmA1iG_DwbXqwR-LbQy2b6YBAh-yyMtLI-s'
+SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sheets_key.json')  # Add this line
 
 # Add timeout constants
 PDF_CONVERSION_TIMEOUT = 30  # seconds
 VISION_API_TIMEOUT = 20  # seconds
+
+# Define specific regions for text extraction
+TEXT_REGIONS = {
+    'date': {
+        'vertical_range': (35, 45),
+        'horizontal_range': (50, 69)
+    },
+    'vendor': {
+        'vertical_range': (20, 32),
+        'horizontal_range': (0, 50)
+    }
+}
 
 def init_vision_client():
     """Initialize Vision client with explicit credentials"""
@@ -154,107 +175,233 @@ def extract_dates_from_text(text):
     
     return latest_date
 
-def rename_file_with_date(pdf_file, extracted_date):
-    """Rename the PDF file to include the extracted date"""
+def rename_file_with_date(pdf_file, result):
+    """Rename the PDF file to include the extracted date and vendor in uppercase"""
     try:
         old_path = os.path.join(COIS_FOLDER, pdf_file)
         
-        # Get the current name without extension
-        base_name = os.path.splitext(pdf_file)[0]
-        
         # Format date for filename (MMDDYY)
-        date_str = datetime.strptime(extracted_date, '%m/%d/%Y').strftime('%m%d%y')
+        date_str = datetime.strptime(result['date'], '%m/%d/%Y').strftime('%m%d%y')
         
-        # Only add date if filename starts with COI_
-        if base_name.startswith('COI_'):
-            new_filename = f"{base_name}_{date_str}.pdf"
-            new_path = os.path.join(COIS_FOLDER, new_filename)
-            
-            # Rename file
-            os.rename(old_path, new_path)
-            print(f"✓ Renamed file to: {new_filename}")
-            return new_filename
-        return pdf_file
+        # Format vendor name: uppercase and replace spaces with underscores
+        vendor_name = re.sub(r'[^a-zA-Z0-9\s]', '', result['vendor'])  # Keep spaces, remove other special chars
+        vendor_name = vendor_name.strip().upper().replace(' ', '_')
+        
+        # Create new filename in required format
+        new_filename = f"COI_{vendor_name}_{date_str}.pdf"
+        new_path = os.path.join(COIS_FOLDER, new_filename)
+        
+        # Perform the rename
+        print(f"{pdf_file} -> {new_filename}")
+        os.rename(old_path, new_path)
+        
+        return new_filename
+        
     except Exception as e:
-        print(f"Error renaming file: {e}")
         return pdf_file
+
+def update_vendor_coi_date(vendor_name, new_date):
+    """Update the COI expiration date for a vendor in the spreadsheet"""
+    try:
+        creds = Credentials.from_service_account_file(
+            SERVICE_ACCOUNT_FILE,
+            scopes=['https://www.googleapis.com/auth/spreadsheets']
+        )
+        
+        service = build('sheets', 'v4', credentials=creds)
+        
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range='VENDORS!B:B'
+        ).execute()
+        
+        rows = result.get('values', [])
+        vendor_row = None
+        for i, row in enumerate(rows):
+            if row and row[0].strip() == vendor_name:
+                vendor_row = i + 1  # Convert to 1-based index
+                break
+        
+        if not vendor_row:
+            return False
+            
+        date_str = datetime.strptime(new_date, '%m/%d/%Y').strftime('%m%d%y')
+        
+        range_name = f'VENDORS!G{vendor_row}'
+        body = {
+            'values': [[date_str]]
+        }
+        
+        service.spreadsheets().values().update(
+            spreadsheetId=SPREADSHEET_ID,
+            range=range_name,
+            valueInputOption='USER_ENTERED',
+            body=body
+        ).execute()
+        
+        return True
+        
+    except Exception as e:
+        return False
 
 def process_single_pdf(pdf_file):
     """Process a single PDF"""
     try:
         pdf_path = os.path.join(COIS_FOLDER, pdf_file)
         
-        # Convert PDF to image
         images = pdf_to_images(pdf_path)
         if not images:
             return None
             
         first_page = images[0]
-        intersection_bounds = get_intersection_bounds(
-            first_page,
-            vertical_range=(35, 45),
-            horizontal_range=(50, 69)
-        )
+        extracted_texts = {}
         
-        # Extract text with timeout
-        with ThreadPoolExecutor() as executor:
-            future = executor.submit(
-                extract_text_from_region,
+        for region_name, bounds in TEXT_REGIONS.items():
+            region_bounds = get_intersection_bounds(
                 first_page,
-                intersection_bounds
+                vertical_range=bounds['vertical_range'],
+                horizontal_range=bounds['horizontal_range']
             )
-            try:
-                extracted_text = future.result(timeout=VISION_API_TIMEOUT)
-                updated_coi_date = extract_dates_from_text(extracted_text.strip())
-                
-                if updated_coi_date:
-                    date_str = updated_coi_date.strftime('%m/%d/%Y')
-                    rename_file_with_date(pdf_file, date_str)
-                    return date_str
-                return None
-            except TimeoutError:
-                return None
+            
+            with ThreadPoolExecutor() as executor:
+                future = executor.submit(
+                    extract_text_from_region,
+                    first_page,
+                    region_bounds
+                )
+                try:
+                    extracted_texts[region_name] = future.result(timeout=VISION_API_TIMEOUT)
+                except TimeoutError:
+                    return None
+        
+        updated_coi_date = extract_dates_from_text(extracted_texts['date'].strip())
+        date_str = updated_coi_date.strftime('%m/%d/%Y') if updated_coi_date else None
+        
+        if not date_str:
+            return None
+            
+        vendor_list = get_active_vendor_list()
+        
+        vendor_name = extract_vendor_name(extracted_texts['vendor'], vendor_list)
+        
+        result = {
+            'date': date_str,
+            'vendor': vendor_name or 'UNKNOWN'
+        }
+        
+        if vendor_name and vendor_name != 'UNKNOWN':
+            update_vendor_coi_date(vendor_name, date_str)
+        
+        return result
                 
     except Exception as e:
-        print(f"Error processing PDF: {e}")
+        print(f"Error: {e}")
         return None
 
 def process_pdfs():
-    """Process PDFs with improved error handling"""
+    """Process PDFs with minimal logging"""
     pdf_files = get_pdf_files()
     if not pdf_files:
         return
     
-    results = []
-    # Process files one at a time with timeouts
     for pdf_file in pdf_files:
         try:
-            updated_coi_date = process_single_pdf(pdf_file)
-            if updated_coi_date:
-                results.append((pdf_file, updated_coi_date))
-                print(f"Processed {pdf_file}: {updated_coi_date}")
+            result = process_single_pdf(pdf_file)
+            if result:
+                rename_file_with_date(pdf_file, result)
         except KeyboardInterrupt:
             sys.exit(0)
         except Exception as e:
-            print(f"Error processing {pdf_file}: {e}")
-            continue
-    
-    print("\nProcessing Summary:")
-    for filename, date in results:
-        print(f"- {filename}: {date}")
+            print(f"Error processing {pdf_file}")
 
 def main():
-    print("Starting COI text extraction...")
     try:
         init_vision_client()
         process_pdfs()
     except KeyboardInterrupt:
-        print("\nProgram interrupted by user")
         sys.exit(0)
     except Exception as e:
-        print(f"\n✗ Error: {e}")
-    finally:
-        print("\nProcessing complete!")
+        print(f"Error: {e}")
+
+def get_openai_client():
+    """Initialize and return OpenAI client"""
+    try:
+        api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            print("Warning: OPENAI_API_KEY not found in environment variables")
+            print(f"Current env variables: {dict(os.environ)}")  # Temporary debug line
+            raise ValueError("OPENAI_API_KEY not found in environment variables")
+        
+        client = OpenAI(
+            api_key=api_key,
+            timeout=30.0  # Add timeout for API calls
+        )
+        return client
+    except Exception as e:
+        print(f"Error initializing OpenAI client: {str(e)}")
+        raise
+
+def extract_vendor_name(text, vendor_list=None):
+    """Extract vendor name from text using OpenAI, comparing against known vendor list"""
+    try:
+        client = get_openai_client()
+        if not client:
+            return None
+            
+        vendor_context = "No vendor list available"
+        if vendor_list:
+            vendor_context = "\n".join(f"{i+1}. {v}" for i, v in enumerate(vendor_list))
+            
+        prompt = f"""Using the following list of active vendors we have on file:
+
+{vendor_context}
+
+And examining this Certificate of Insurance text:
+{text[:1000]}
+
+Which vendor from our list do you think is associated with this document?
+If none match closely enough, return 'UNKNOWN'.
+Respond ONLY with the exact vendor name from the list or 'UNKNOWN'."""
+
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a precise COI analyzer. Match the document to our known vendor list."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1,
+            max_tokens=50
+        )
+        
+        vendor_name = response.choices[0].message.content.strip()
+        return vendor_name if vendor_name != "UNKNOWN" else None
+    except Exception as e:
+        print(f"Error extracting vendor name: {e}")
+        return None
+
+def get_active_vendor_list():
+    """Retrieve a list of active vendor names from the spreadsheet"""
+    try:
+        if not os.path.exists(SERVICE_ACCOUNT_FILE):
+            raise FileNotFoundError(f"Service account file not found: {SERVICE_ACCOUNT_FILE}")
+            
+        creds = Credentials.from_service_account_file(
+            SERVICE_ACCOUNT_FILE,
+            scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
+        )
+        
+        service = build('sheets', 'v4', credentials=creds)
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range='VENDORS!B2:B'
+        ).execute()
+        
+        rows = result.get('values', [])
+        return [row[0] for row in rows if row]
+        
+    except Exception as e:
+        print(f"Error loading vendor list: {e}")
+        return []
 
 if __name__ == "__main__":
     main()
