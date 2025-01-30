@@ -1,5 +1,7 @@
 import os
 import sys
+import logging
+import time
 from dotenv import load_dotenv
 from openai import OpenAI
 import imaplib
@@ -7,6 +9,11 @@ import email
 from email.header import decode_header
 from bs4 import BeautifulSoup
 import html2text
+
+# Set up logging
+logging.basicConfig(level=logging.INFO,
+                   format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -39,17 +46,59 @@ GMAIL_LABELS = {
 def save_pdf_attachment(msg, sender):
     """Save PDF attachments from email with original filename"""
     saved_files = []
+    attachment_info = []
     
-    if msg.is_multipart():
-        for part in msg.walk():
-            if part.get_content_type() == 'application/pdf':
-                filename = part.get_filename()
-                if filename:
-                    filepath = os.path.join(COIS_FOLDER, filename)
-                    os.makedirs(COIS_FOLDER, exist_ok=True)
-                    with open(filepath, 'wb') as f:
-                        f.write(part.get_payload(decode=True))
-                    saved_files.append(filepath)
+    try:
+        if msg.is_multipart():
+            parts = [part for part in msg.walk()]
+            logger.info(f"Total message parts: {len(parts)}")
+            
+            for part in parts:
+                content_type = part.get_content_type()
+                content_disposition = str(part.get("Content-Disposition"))
+                
+                logger.info(f"Found part: {content_type} - Disposition: {content_disposition}")
+                
+                # More aggressive PDF detection
+                is_pdf = (content_type == 'application/pdf' or 
+                         content_type == 'application/x-pdf' or 
+                         (content_disposition and '.pdf' in content_disposition.lower()))
+                
+                if is_pdf:
+                    filename = part.get_filename()
+                    if not filename and '.pdf' in content_disposition.lower():
+                        filename = f"attachment_{len(saved_files)}.pdf"
+                        
+                    if filename:
+                        try:
+                            payload = part.get_payload(decode=True)
+                            if payload is None:
+                                logger.error(f"Payload is None for file: {filename}")
+                                attachment_info.append(f"Failed - {filename}: No payload (possible Gmail block)")
+                                continue
+                                
+                            filepath = os.path.join(COIS_FOLDER, filename)
+                            os.makedirs(COIS_FOLDER, exist_ok=True)
+                            
+                            with open(filepath, 'wb') as f:
+                                f.write(payload)
+                            saved_files.append(filepath)
+                            attachment_info.append(f"Success - {filename}")
+                            logger.info(f"Successfully saved PDF: {filename}")
+                            
+                        except Exception as e:
+                            logger.error(f"Failed to save {filename}: {str(e)}")
+                            attachment_info.append(f"Failed - {filename}: {str(e)}")
+                    else:
+                        logger.warning("PDF attachment found but no filename")
+                        attachment_info.append("Failed - PDF without filename")
+        
+        logger.info("Attachment processing summary:")
+        for info in attachment_info:
+            logger.info(f"  • {info}")
+            
+    except Exception as e:
+        logger.error(f"Error processing attachments: {str(e)}")
     
     return saved_files
 
@@ -179,10 +228,103 @@ def classify_email_content(subject, body):
     except Exception as e:
         return "Classification Error"
 
-def process_recent_emails(num_emails=1):
-    """Process all emails in inbox"""
+def fetch_entire_thread(imap, email_id):
+    """
+    Fetch the entire thread by using the References or In-Reply-To headers.
+    Returns a list of message bodies (email.message.Message objects) for the thread.
+    """
+    _, raw_data = imap.fetch(email_id, "(RFC822)")
+    if not raw_data or not raw_data[0]:
+        logger.error(f"Could not fetch base email {email_id}")
+        return []
+    base_msg = email.message_from_bytes(raw_data[0][1])
+    
+    ref_ids = []
+    references = base_msg.get("References")
+    in_reply_to = base_msg.get("In-Reply-To")
+    if references:
+        # Typically a space-separated list of message IDs
+        ref_ids = references.split()
+    elif in_reply_to:
+        ref_ids = [in_reply_to]
+
+    # Always include our base message as part of the thread
+    messages_in_thread = [(email_id, base_msg)]
+    
+    # For each reference, fetch that message if it still exists
+    for ref_id in ref_ids:
+        ref_id = ref_id.strip("<>")
+        result, search_data = imap.search(None, f'HEADER Message-ID "{ref_id}"')
+        if result == "OK" and search_data[0]:
+            for mid in search_data[0].split():
+                _, ref_msg_data = imap.fetch(mid, "(RFC822)")
+                if ref_msg_data and ref_msg_data[0]:
+                    ref_msg = email.message_from_bytes(ref_msg_data[0][1])
+                    messages_in_thread.append((mid, ref_msg))
+
+    return messages_in_thread
+
+def process_thread(imap, email_id):
+    """
+    Process an entire thread as one combined unit.
+    """
+    thread_messages = fetch_entire_thread(imap, email_id)
+    if not thread_messages:
+        return None
+    
+    # Concatenate bodies, gather attachments
+    combined_body = []
+    has_coi_attachments = []
+    
+    for (mid, msg) in thread_messages:
+        try:
+            body_part = extract_email_content(msg) or ""
+            combined_body.append(body_part)
+        except Exception as e:
+            logger.error(f"Body extraction error in thread: {e}")
+
+    full_body = "\n\n".join(combined_body)
+    # Classify once using the base message subject
+    _, base_msg = thread_messages[0]
+    subject = decode_email_subject(base_msg["subject"]) or ""
+    classification = None
+
+    # Attempt classification
+    for attempt in range(3):
+        try:
+            classification = classify_email_content(subject, full_body)
+            logger.info(f"Thread classification: {classification}")
+            break
+        except Exception as e:
+            logger.error(f"Thread classification attempt {attempt + 1} failed: {e}")
+            time.sleep(1)
+            if attempt == 2:
+                return None
+
+    # If COI, gather PDFs from all messages
+    if classification == "Updated Certificate of Insurance":
+        for (mid, msg) in thread_messages:
+            saved_files = save_pdf_attachment(msg, msg.get("From") or "")
+            if saved_files:
+                has_coi_attachments.extend(saved_files)
+        if has_coi_attachments:
+            logger.info(f"Thread PDFs saved: {has_coi_attachments}")
+
+    return classification
+
+def process_single_email(imap, email_id):
+    """
+    Now replaced by thread-level processing, but we keep minimal logic to unify calls.
+    """
+    logger.info(f"\nProcessing entire thread for email ID: {email_id}")
+    classification = process_thread(imap, email_id)
+    return classification
+
+def process_recent_emails(num_emails=None):  # Changed default to None
+    """Process emails with improved error handling"""
     imap = connect_to_gmail()
     if not imap:
+        logger.error("Failed to connect to Gmail")
         return
     
     try:
@@ -190,70 +332,60 @@ def process_recent_emails(num_emails=1):
         _, messages = imap.search(None, "ALL")
         email_ids = messages[0].split()
         
-        if not email_ids:
-            print("No emails found in inbox")
-            return None
+        # Only slice if num_emails is specified
+        if num_emails:
+            email_ids = email_ids[-num_emails:]
+        email_ids.reverse()  # Process newest to oldest
         
-        # Initialize counters
-        total_emails = len(email_ids)
-        files_downloaded = 0
-        label_counts = {label: 0 for label in set(GMAIL_LABELS.values())}
-        processed_emails = []
+        logger.info(f"Found {len(email_ids)} emails to process")
         
-        print(f"\nProcessing {total_emails} emails...")
+        success_count = 0
+        failure_count = 0
         
+        processed_results = []
+
         for email_id in email_ids:
             try:
-                _, msg_data = imap.fetch(email_id, "(RFC822)")
-                email_body = msg_data[0][1]
-                msg = email.message_from_bytes(email_body)
+                # Verify email still exists before processing
+                imap.select("INBOX")
+                _, check = imap.fetch(email_id, "(FLAGS)")
+                if check[0] is None:
+                    logger.warning(f"Email {email_id} no longer exists, skipping")
+                    continue
                 
-                subject = decode_email_subject(msg["subject"])
-                sender = msg["from"]
-                body = extract_email_content(msg)
-                classification = classify_email_content(subject, body)
-                
-                if classification == "Updated Certificate of Insurance":
-                    saved_files = save_pdf_attachment(msg, msg['from'])
-                    files_downloaded += len(saved_files)
-                    if saved_files:
-                        if move_email_to_label(imap, email_id, GMAIL_LABELS[classification]):
-                            label_counts[GMAIL_LABELS[classification]] += 1
+                classification = process_single_email(imap, email_id)
+                if classification:
+                    processed_results.append((email_id, classification))
+                    success_count += 1
                 else:
-                    if classification in GMAIL_LABELS:
-                        label_name = GMAIL_LABELS[classification]
-                    else:
-                        label_name = GMAIL_LABELS["Other"]
-                    
-                    if move_email_to_label(imap, email_id, label_name):
-                        label_counts[label_name] += 1
+                    failure_count += 1
+                time.sleep(0.5)  # Add small delay between processing
                 
-                processed_emails.append({
-                    "sender": sender,
-                    "subject": subject,
-                    "body": body,
-                    "category": classification
-                })
-                
-            except Exception as e:
+            except imaplib.IMAP4.error as e:
+                logger.error(f"IMAP error for email {email_id}: {e}")
+                failure_count += 1
                 continue
-        
-        # Print final statistics
-        print("\nProcessing Complete!")
-        print(f"Total emails processed: {total_emails}")
-        print(f"Total PDFs downloaded: {files_downloaded}")
-        print("\nEmails moved to labels:")
-        for label, count in label_counts.items():
-            if count > 0:
-                print(f"- {label}: {count}")
-        
-        imap.close()
-        imap.logout()
-        return processed_emails
+
+        # After we finish processing attachments/body/classification, move emails
+        for email_id, classification in processed_results:
+            label = GMAIL_LABELS.get(classification, GMAIL_LABELS["Other"])
+            if move_email_to_label(imap, email_id, label):
+                logger.info(f"Moved email {email_id} to label: {label}")
+            else:
+                logger.error(f"Failed to move email {email_id} to label: {label}")
+
+        logger.info(f"Processing complete. Successes: {success_count}, Failures: {failure_count}")
         
     except Exception as e:
-        print(f"Error: {e}")
-        return None
+        logger.error(f"Error in main processing loop: {e}")
+    finally:
+        try:
+            imap.close()
+            imap.logout()
+        except:
+            pass
 
 if __name__ == "__main__":
-    process_recent_emails()
+    # Only use num_emails if specifically provided as argument
+    num_emails = int(sys.argv[1]) if len(sys.argv) > 1 else None
+    process_recent_emails(num_emails)

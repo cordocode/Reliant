@@ -9,6 +9,11 @@ sheets_key.json
 drive_key.json
 email_key.json
 excel-extractor-*.json
+token.pickle
+credentials/token.json
+email_sorter_0auth.json
+
+
 
 # Python
 __pycache__/
@@ -18,3 +23,9 @@ __pycache__/
 .Python
 env/
 venv/
+RELIANT_SCRIPTS/credentials/token.json
+email_sorter_0auth.json
+RELIANT_SCRIPTS/credentials/token.json
+email_sorter_0auth.json
+credentials/token.json
+email_sorter_0auth.json
