@@ -63,31 +63,15 @@ def get_openai_client():
 def get_gmail_service():
     """Get or create Gmail API service object."""
     creds = None
-    token_path = os.path.join(CREDS_DIR, 'token.json')  # Changed from pickle to json
+    token_path = os.path.join(CREDS_DIR, 'token.json')
     
     # Load existing credentials if they exist
     if os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-        
-    # If no valid credentials available, let user log in
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                os.getenv('GMAIL_OAUTH_CREDENTIALS_PATH'), SCOPES)
-            creds = flow.run_local_server(port=0)
-        
+
         # Save the credentials for future runs
         with open(token_path, 'w') as token:
             token.write(creds.to_json())
-    
-    try:
-        # Disable cache_discovery to avoid file_cache warning
-        return build('gmail', 'v1', credentials=creds, cache_discovery=False)
-    except Exception as e:
-        logger.error(f"Error building Gmail service: {e}")
-        return None
 
 def get_thread_ids(service, query="in:inbox"):
     """Fetch all unique thread IDs from inbox"""
@@ -128,8 +112,8 @@ def classify_thread_content(subject, full_body):
     """Classify thread content using OpenAI with weighted subject"""
     try:
         client = get_openai_client()
-        # Repeat subject 3 times to give it more weight
-        weighted_text = f"Subject: {subject}\nSubject: {subject}\nSubject: {subject}\n\nBody Content:\n{full_body}"
+        
+        weighted_text = f"Subject: {subject}\nSubject: Body Content:\n{full_body}"
         
         prompt = f"""Based on the following text, which category matches most closely to this email thread?
         Available categories:
