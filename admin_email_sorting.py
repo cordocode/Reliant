@@ -2,16 +2,16 @@ import os
 import pickle
 import logging
 import time
+import base64  # Added for decoding message bodies
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from dotenv import load_dotenv
-from openai import OpenAI
+import openai  # Using the standard OpenAI library
 
 # Set up logging without timestamps or level
-logging.basicConfig(level=logging.INFO,
-                   format='%(message)s')
+logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
 # Email Categories
@@ -58,20 +58,27 @@ def get_openai_client():
     api_key = os.getenv('OPENAI_API_KEY')
     if not api_key:
         raise ValueError("OPENAI_API_KEY not found in environment variables")
-    return OpenAI(api_key=api_key)
+    openai.api_key = api_key
+    return openai
 
 def get_gmail_service():
     """Get or create Gmail API service object."""
     creds = None
-    token_path = os.path.join(CREDS_DIR, 'token.json')
-    
-    # Load existing credentials if they exist
-    if os.path.exists(token_path):
-        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-
-        # Save the credentials for future runs
-        with open(token_path, 'w') as token:
+    if os.path.exists(TOKEN_PATH):
+        creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
+    # If there are no (valid) credentials available, let the user log in.
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            # Assumes that your client_secret file is in the credentials directory as 'credentials.json'
+            flow = InstalledAppFlow.from_client_secrets_file(os.path.join(CREDS_DIR, 'credentials.json'), SCOPES)
+            creds = flow.run_local_server(port=0)
+        # Save the credentials for the next run
+        with open(TOKEN_PATH, 'w') as token:
             token.write(creds.to_json())
+    service = build('gmail', 'v1', credentials=creds)
+    return service
 
 def get_thread_ids(service, query="in:inbox"):
     """Fetch all unique thread IDs from inbox"""
@@ -86,7 +93,7 @@ def get_thread_ids(service, query="in:inbox"):
             page_token = threads['nextPageToken']
             threads = service.users().threads().list(
                 userId='me', q=query, pageToken=page_token).execute()
-            thread_ids.extend(thread['id'] for thread in threads['threads'])
+            thread_ids.extend(thread['id'] for thread in threads.get('threads', []))
             
         return thread_ids
     except Exception as e:
@@ -97,10 +104,10 @@ def get_thread_messages(service, thread_id):
     """Get all messages in a thread"""
     try:
         thread = service.users().threads().get(userId='me', id=thread_id).execute()
-        messages = thread['messages']
+        messages = thread.get('messages', [])
         
         # Sort messages by internal date (oldest first)
-        messages.sort(key=lambda msg: int(msg['internalDate']))
+        messages.sort(key=lambda msg: int(msg.get('internalDate', 0)))
         
         logger.info(f"Found {len(messages)} messages in thread")
         return messages
@@ -113,28 +120,28 @@ def classify_thread_content(subject, full_body):
     try:
         client = get_openai_client()
         
-        weighted_text = f"Subject: {subject}\nSubject: Body Content:\n{full_body}"
+        weighted_text = f"Subject: {subject}\nBody Content:\n{full_body}"
         
         prompt = f"""Based on the following text, which category matches most closely to this email thread?
-        Available categories:
-        - COI_RECORDS
-        - GREASE_TRAP_RECORDS
-        - GROSS_SALES_REPORT
-        - HVAC_RECORDS
-        - INVOICES
+Available categories:
+- COI_RECORDS
+- GREASE_TRAP_RECORDS
+- GROSS_SALES_REPORT
+- HVAC_RECORDS
+- INVOICES
 
-        Respond ONLY with the exact category name that matches best.
+Respond ONLY with the exact category name that matches best.
 
-        Email thread content:
-        {weighted_text[:4000]}"""  # Increased context length
+Email thread content:
+{weighted_text[:4000]}"""  # Limit context length if needed
 
-        response = client.chat.completions.create(
+        response = client.ChatCompletion.create(
             model="gpt-4o",
             messages=[
-                {"role": "developer", "content": "You are a precise email classifier who works in and has a deep understanding of the commercial property management world. Respond only with the exact category name from the provided list."},
+                {"role": "system", "content": "You are a precise email classifier who works in the commercial property management industry. Respond only with the exact category name from the provided list."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.3,  # Lower temperature for more consistent results
+            temperature=0.3,
             max_tokens=10
         )
         
@@ -154,32 +161,32 @@ def determine_thread_status(subject, full_body):
         
         messages = [
             {
-                "role": "developer",
-                "content": """You are an expert email analyzer for a property management company. 
-                You understand email context and can determine when:
-                - A thread is COMPLETED (all questions answered, final confirmations received)
-                - A thread needs ACTION (someone is waiting for a response or follow-up)
-                - A thread needs URGENT_ACTION (immediate attention required, time-sensitive requests)
-                Respond only with one of these three status codes."""
+                "role": "system",
+                "content": """You are an expert email analyzer for a property management company.
+You understand email context and can determine when:
+- A thread is COMPLETED (all questions answered, final confirmations received)
+- A thread needs ACTION (someone is waiting for a response or follow-up)
+- A thread needs URGENT_ACTION (immediate attention required, time-sensitive requests)
+Respond only with one of these three status codes."""
             },
             {
                 "role": "assistant",
                 "content": """I will analyze the email thread and respond with:
-                COMPLETED - when all matters are resolved
-                ACTION - when a response or follow-up is needed
-                URGENT_ACTION - when immediate attention is required"""
+COMPLETED - when all matters are resolved
+ACTION - when a response or follow-up is needed
+URGENT_ACTION - when immediate attention is required"""
             },
             {
                 "role": "user",
                 "content": f"""Analyze this email thread and determine its status:
-                Subject: {subject}
-                
-                Thread Content:
-                {full_body[:4000]}"""
+Subject: {subject}
+
+Thread Content:
+{full_body[:4000]}"""
             }
         ]
 
-        response = client.chat.completions.create(
+        response = client.ChatCompletion.create(
             model="gpt-4o",
             messages=messages,
             temperature=0.3,
@@ -231,7 +238,6 @@ def save_pdf_attachment(message, sender, service):
                 ).execute()
                 
                 file_data = attachment['data']
-                import base64
                 file_bytes = base64.urlsafe_b64decode(file_data)
                 
                 # Get unique filepath for this download
@@ -309,8 +315,8 @@ def process_thread(service, thread_id):
         # Get thread subject and sender info
         first_message = messages[0]
         last_message = messages[-1]
-        headers = first_message['payload']['headers']
-        last_headers = last_message['payload']['headers']
+        headers = first_message['payload'].get('headers', [])
+        last_headers = last_message['payload'].get('headers', [])
         
         subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), 'No Subject')
         last_sender = get_email_from_headers(last_headers)
@@ -332,6 +338,7 @@ def process_thread(service, thread_id):
         # First determine category and status
         category = classify_thread_content(subject, combined_text)
         if not category:
+            logger.error("Failed to classify thread")
             return False
             
         status = determine_thread_status(subject, combined_text)
@@ -358,7 +365,7 @@ def process_thread(service, thread_id):
                 if 'payload' in message:
                     downloaded = save_pdf_attachment(
                         message, 
-                        get_email_from_headers(message['payload']['headers']),
+                        get_email_from_headers(message['payload'].get('headers', [])),
                         service  # Pass the service object
                     )
                     pdf_files.extend(downloaded)
@@ -368,7 +375,7 @@ def process_thread(service, thread_id):
             
             # Move to appropriate label
             label = EMAIL_CATEGORIES[category]['label']
-            if not move_email_to_label(service, thread_id, label):  # Pass the service object
+            if not move_email_to_label(service, thread_id, label):
                 logger.error("Failed to move thread to appropriate label")
                 success = False
             else:
@@ -383,22 +390,31 @@ def process_thread(service, thread_id):
         return False
 
 def get_message_body(message):
-    """Extract message body from Gmail API message format"""
+    """Extract and decode message body from Gmail API message format"""
     try:
         if 'payload' not in message:
             return ""
-            
-        parts = []
-        if 'body' in message['payload']:
-            if 'data' in message['payload']['body']:
-                parts.append(message['payload']['body']['data'])
         
-        if 'parts' in message['payload']:
-            for part in message['payload']['parts']:
-                if 'data' in part.get('body', {}):
-                    parts.append(part['body']['data'])
+        data_list = []
+        payload = message['payload']
+        # If the payload itself has a body with data
+        if 'body' in payload and 'data' in payload['body']:
+            data_list.append(payload['body']['data'])
         
-        return "\n".join(parts)
+        # Some messages have multiple parts
+        if 'parts' in payload:
+            for part in payload['parts']:
+                # Some parts might be nested, so check for data in the part body
+                if 'body' in part and 'data' in part['body']:
+                    data_list.append(part['body']['data'])
+        
+        decoded_parts = []
+        for data in data_list:
+            if data:
+                # Decode the base64url encoded data
+                decoded = base64.urlsafe_b64decode(data.encode('ASCII')).decode('utf-8', errors='replace')
+                decoded_parts.append(decoded)
+        return "\n".join(decoded_parts)
         
     except Exception as e:
         logger.error(f"Error extracting message body: {e}")
@@ -455,4 +471,3 @@ if __name__ == '__main__':
     load_dotenv()
     test_mode = get_user_preference()
     process_inbox(test_mode)
-
