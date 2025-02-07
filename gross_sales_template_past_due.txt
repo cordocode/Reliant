@@ -1,7 +1,0 @@
-Subject: Past Due Gross Sales Reports
-[Tenant Name],
-We're missing [Cycles] [Frequency] gross sales reports for [Property Address]. Your last submitted report was on [Last Submitted Date].
-Please send the outstanding reports, signed by an officer, to bring your account current.
-Best,
-
-Reliant Property Management

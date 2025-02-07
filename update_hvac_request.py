@@ -12,13 +12,24 @@ SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SERVICE_ACCOUNT_FILE = '/Users/cordo/Documents/RELIANT_SCRIPTS/email_key.json'
 SPREADSHEET_ID = '18-a4IUWgZ27l_dlrJA7L_MmDmpDLVWEEUCTIDAsUBuo'
 SHEET_NAME = 'TENANT!A1:Z'
-TEMPLATE_PATH = '/Users/cordo/Documents/RELIANT_SCRIPTS/hvac_template.txt'
 
-# Add email configuration
+# Add email configuration and template
 load_dotenv()
 SENDER_EMAIL = os.getenv('sender_email')
 APP_PASSWORD = os.getenv('app_password')
 EMAIL_SUBJECT = "HVAC Maintenance Contract Update Required"
+
+EMAIL_TEMPLATE = """Dear [Tenant Name],
+
+This letter serves as a reminder that, pursuant to your lease agreement [lease section], you are required to maintain an annual HVAC maintenance contract with a licensed contractor for the HVAC equipment servicing your premises at [Tenant Address]. Our records indicate your previous contract expired on [Previous Contract Expiration Date].
+
+Please provide our office with a copy of your updated annual HVAC maintenance contract. You may email a copy of the contract to reliantpmcontracts@gmail.com.
+
+If you have any questions, please let us know.
+
+Thank you,
+
+Reliant Property Management"""
 
 def initialize_sheets_service():
     """Initialize and return the Google Sheets service"""
@@ -89,15 +100,6 @@ def get_manual_tenant_name():
         if tenant_name:
             return tenant_name
         print("Please enter a valid tenant name.")
-
-def read_email_template():
-    """Read the email template file"""
-    try:
-        with open(TEMPLATE_PATH, 'r') as file:
-            return file.read()
-    except Exception as e:
-        print(f"Error reading template file: {e}")
-        return None
 
 def get_lease_section(property_code):
     """Determine lease section based on property code"""
@@ -171,11 +173,9 @@ def get_user_confirmation(count):
 def get_hvac_data(service, mode):
     """Read HVAC data including tenant names, emails, and unit numbers"""
     try:
-        email_template = read_email_template()
-        if not email_template:
-            print("Failed to read email template")
-            return
-
+        # Replace read_email_template() with EMAIL_TEMPLATE
+        email_template = EMAIL_TEMPLATE
+        
         range_name = 'TENANT!B:O'
         result = service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID,

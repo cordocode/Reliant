@@ -3,6 +3,12 @@ from googleapiclient.discovery import build
 from dotenv import load_dotenv
 from datetime import datetime
 import os
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+# Load environment variables
+load_dotenv()
 
 # Constants
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']  # Full access needed
@@ -11,8 +17,65 @@ SPREADSHEET_ID = '18-a4IUWgZ27l_dlrJA7L_MmDmpDLVWEEUCTIDAsUBuo'
 SHEET_NAME = 'TENANT!A1:Z'  # Updated to include range
 
 # Add template path and email subject constants
-TEMPLATE_PATH = '/Users/cordo/Documents/RELIANT_SCRIPTS/Grease Trap Template.md'
 EMAIL_SUBJECT = "Required Grease Trap Maintenance"
+EMAIL_TEMPLATE = """Dear [Tenant Name],
+
+As specified in your Lease Agreement's Rules and Regulations, you are required to maintain, monitor, and empty the grease trap associated with your restaurant or food preparation business at your own expense.
+
+We are writing to request critical documentation to verify proper maintenance. Specifically, we need you to provide a copy of your most recent quarterly grease trap service manifest. This documentation must be:
+
+Completed by a licensed, insured, and certified contractor
+Dated within the last quarter
+Clearly showing service details for the premises at [Tenant Address]
+
+Proper grease trap maintenance is crucial to prevent serious potential issues, including:
+
+Significant plumbing blockages
+Potential restaurant operations disruptions
+Risk of costly flood damage
+
+Your last recorded service was on [Last Service Date]. Please submit the updated manifest within 10 business days of receiving this notice.
+
+Failure to provide documentation may result in the landlord taking necessary actions as outlined in your lease agreement.
+
+Thank you for your immediate attention to this important matter.
+
+Sincerely,
+
+Reliant Property Management"""
+
+# Add email configuration
+SENDER_EMAIL = 'admin@reliant-pm.com'  # Direct from .env
+APP_PASSWORD = 'otftekojfvvhqxra'      # Direct from .env
+
+def send_email(recipient_email, subject, body):
+    """Send email using configured SMTP server"""
+    try:
+        # Create message
+        message = MIMEMultipart()
+        message['From'] = SENDER_EMAIL
+        message['To'] = recipient_email
+        message['Subject'] = subject
+
+        # Add body
+        message.attach(MIMEText(body, 'plain'))
+
+        print(f"Attempting to send email from {SENDER_EMAIL} to {recipient_email}")
+        
+        # Create SMTP session with Gmail
+        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+            server.starttls()
+            server.login(SENDER_EMAIL, APP_PASSWORD)
+            server.send_message(message)
+
+        print(f"Email sent successfully to {recipient_email}")
+        return True
+
+    except Exception as e:
+        print(f"Failed to send email: {e}")
+        print(f"Using sender email: {SENDER_EMAIL}")
+        print(f"App password length: {len(APP_PASSWORD) if APP_PASSWORD else 0}")
+        return False
 
 def initialize_sheets_service():
     """Initialize and return the Google Sheets service"""
@@ -50,15 +113,6 @@ def format_date_for_display(date_str):
     except ValueError:
         return date_str if date_str else 'N/A'
 
-def read_email_template():
-    """Read the email template file"""
-    try:
-        with open(TEMPLATE_PATH, 'r') as file:
-            return file.read()
-    except Exception as e:
-        print(f"Error reading template file: {e}")
-        return None
-
 def format_email_content(template, tenant_name, tenant_address, last_service):
     """Format the email template with tenant's information"""
     try:
@@ -74,14 +128,28 @@ def format_email_content(template, tenant_name, tenant_address, last_service):
         print(f"Error formatting email: {e}")
         return None
 
-def get_grease_trap_data(service):
+def get_tenant_names():
+    """Get specific tenant names from user input"""
+    tenant_names = []
+    print("\nEnter tenant names (press Enter twice to finish):")
+    while True:
+        name = input().strip()
+        if not name:
+            if tenant_names:  # If we have at least one name, exit
+                break
+            else:  # If no names yet, confirm
+                confirm = input("No names entered. Do you want to proceed? (y/n): ")
+                if confirm.lower() == 'y':
+                    break
+                continue
+        tenant_names.append(name.upper())  # Store names in uppercase for case-insensitive comparison
+    return tenant_names
+
+def get_grease_trap_data(service, mode=1, tenant_names=None):
     """Fetch grease trap related data from Tenant sheet"""
     try:
-        # Read email template first
-        email_template = read_email_template()
-        if not email_template:
-            print("Failed to read email template")
-            return
+        # Use EMAIL_TEMPLATE constant directly
+        email_template = EMAIL_TEMPLATE
 
         # Get columns D, C, P, Q from Tenant sheet
         range_name = 'TENANT!C:Q'
@@ -98,6 +166,11 @@ def get_grease_trap_data(service):
         print("\nGrease Trap Records:")
         print("===================")
         
+        processed_count = 0
+        
+        # Create a list to store all email data
+        emails_to_send = []
+        
         # Start from index 1 to skip header row
         for i, row in enumerate(values[1:], start=2):
             try:
@@ -108,6 +181,17 @@ def get_grease_trap_data(service):
                 
                 # Only process if grease trap is required
                 if grease_required == 'YES':
+                    # Check if we should process this tenant based on mode
+                    if mode == 2:
+                        tenant_matches = any(
+                            name.upper().strip() in tenant_name.upper().strip() or 
+                            tenant_name.upper().strip() in name.upper().strip()
+                            for name in tenant_names
+                        )
+                        if not tenant_matches:
+                            continue
+
+                    processed_count += 1
                     # Get corresponding email from Entry sheet
                     tenant_email = get_email_from_entry(service, i)
                     
@@ -119,19 +203,67 @@ def get_grease_trap_data(service):
                         last_service
                     )
                     
-                    print(f"\nRow {i}:")
-                    print(f"Tenant: {tenant_name}")
-                    print(f"Address: {tenant_address}")
-                    print(f"Email: {tenant_email}")
-                    print(f"Last Service Date: {last_service}")
-                    print("\nEmail Content Preview:")
-                    print("==============")
-                    print(email_content)
-                    print("==============\n")
+                    if tenant_email != 'N/A':
+                        emails_to_send.append({
+                            'tenant_name': tenant_name,
+                            'tenant_email': tenant_email,
+                            'subject': EMAIL_SUBJECT,
+                            'content': email_content,
+                            'row': i,
+                            'address': tenant_address,
+                            'last_service': last_service
+                        })
+                    else:
+                        print(f"No valid email found for {tenant_name}")
                     
             except IndexError:
                 print(f"Skipping row {i} - incomplete data")
                 continue
+
+        # If we have emails to send, show the batch preview
+        if emails_to_send:
+            print("\nEmail Batch Preview:")
+            print("===================")
+            for idx, email_data in enumerate(emails_to_send, 1):
+                print(f"\nEmail {idx} of {len(emails_to_send)}:")
+                print(f"To: {email_data['tenant_name']} <{email_data['tenant_email']}>")
+                print(f"Subject: {email_data['subject']}")
+                print(f"Property: {email_data['address']}")
+                print(f"Last Service: {email_data['last_service']}")
+                print("\nContent:")
+                print("--------")
+                print(email_data['content'])
+                print("--------\n")
+            
+            # Batch confirmation
+            while True:
+                confirm = input(f"\nSend all {len(emails_to_send)} emails? (y/n): ").lower()
+                if confirm in ['y', 'n']:
+                    break
+                print("Please enter 'y' or 'n'")
+            
+            if confirm == 'y':
+                successful = 0
+                failed = 0
+                for email_data in emails_to_send:
+                    if send_email(email_data['tenant_email'], 
+                                email_data['subject'], 
+                                email_data['content']):
+                        successful += 1
+                    else:
+                        failed += 1
+                
+                print(f"\nEmail Batch Results:")
+                print(f"Successfully sent: {successful}")
+                print(f"Failed to send: {failed}")
+            else:
+                print("\nEmail batch cancelled")
+                
+        elif processed_count == 0:
+            if mode == 2:
+                print("\nNo matching tenants found with grease trap requirements.")
+            else:
+                print("\nNo tenants found with grease trap requirements.")
 
     except Exception as e:
         print(f"Error reading grease trap data: {e}")
@@ -143,8 +275,25 @@ def main():
         print("Failed to initialize Google Sheets service")
         return
 
+    # Mode selection
+    while True:
+        print("\nSelect mode:")
+        print("1. Process all tenants")
+        print("2. Process specific tenants")
+        try:
+            mode = int(input("Enter mode (1 or 2): "))
+            if mode in [1, 2]:
+                break
+            print("Invalid mode. Please enter 1 or 2.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+
+    tenant_names = None
+    if mode == 2:
+        tenant_names = get_tenant_names()
+        
     # Get and display grease trap data
-    get_grease_trap_data(service)
+    get_grease_trap_data(service, mode, tenant_names)
 
 if __name__ == '__main__':
     main()
