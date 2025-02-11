@@ -279,7 +279,7 @@ SUBJECT: [Your subject line here]
                 {"role": "system", "content": "You are an experienced commercial property manager writing a professional email."},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.7,
+            temperature=0.1,
             max_tokens=500
         )
         
