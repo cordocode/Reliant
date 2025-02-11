@@ -169,6 +169,12 @@ def format_data_for_prompt(tenant_data, vendor_data):
 
     return "\n".join(lines)
 
+def clean_gpt_response(raw_response):
+    """Clean GPT response by removing markdown code blocks and other formatting"""
+    # Remove markdown code block indicators
+    cleaned = raw_response.replace('```json', '').replace('```', '').strip()
+    return cleaned
+
 def ask_gpt_for_emails(user_query, tenant_data, vendor_data):
     """
     We load ALL tenants/vendors into a single prompt. Then we ask GPT:
@@ -185,7 +191,7 @@ The user says: "{user_query}"
 
 Your task: Identify exactly which rows match the user's request, 
 and return ONLY a JSON array of their 'contact_email' or 'vendor_email' fields. 
-No other text or explanation.
+Do not use markdown formatting or code blocks. Return the raw JSON array only.
 
 If there are no matches, return an empty JSON array: []
 If multiple matches, return them all.
@@ -196,31 +202,157 @@ Example output:
 Now produce only the JSON array for this request.
 """
     raw_response = query_openai(prompt)
+    cleaned_response = clean_gpt_response(raw_response)
 
     # Attempt to parse as JSON list
     try:
-        result = json.loads(raw_response)
+        result = json.loads(cleaned_response)
         # ensure it's a list of strings
         if isinstance(result, list) and all(isinstance(x, str) for x in result):
-            return result
+            return [email for email in result if email and email != "--------"]
         else:
-            print("GPT returned JSON but not a list of strings. Raw:", raw_response)
+            print("GPT returned JSON but not a list of strings. Raw:", cleaned_response)
             return []
-    except json.JSONDecodeError:
-        print("GPT did not return valid JSON. Raw:", raw_response)
+    except json.JSONDecodeError as e:
+        print(f"JSON parsing error: {e}")
+        print("Raw response:", raw_response)
+        print("Cleaned response:", cleaned_response)
         return []
 
-# ---------------------------------------------
-#         MAIN TEST LOOP
-# ---------------------------------------------
+def verify_emails(emails):
+    """Ask user to verify if the returned email list is correct"""
+    if not emails:
+        print("\nNo emails were found matching your request.")
+        return False
+    
+    print("\nFound these matching emails:")
+    for i, email in enumerate(emails, 1):
+        print(f"{i}. {email}")
+    
+    while True:
+        response = input("\nAre these the correct emails? (yes/no): ").lower().strip()
+        if response in ['y', 'yes']:
+            return True
+        elif response in ['n', 'no']:
+            return False
+        else:
+            print("Please answer 'yes' or 'no'")
+
+def get_emails_with_verification(user_query, tenant_data, vendor_data):
+    """Keep trying to get correct emails until user is satisfied"""
+    while True:
+        emails = ask_gpt_for_emails(user_query, tenant_data, vendor_data)
+        if verify_emails(emails):
+            return emails
+        
+        print("\nLet's try again with a different description.")
+        user_query = input("Please rephrase your request: ")
+        if user_query.lower() in ['quit', 'exit', 'cancel']:
+            return []
+
+def draft_email_content(email_purpose):
+    """
+    Ask GPT to draft a professional email based on the user's request.
+    Returns a tuple of (subject, body)
+    """
+    prompt = f"""
+Write a professional email for a commercial property manager.
+
+Requirements:
+- Subject line should be clear and concise
+- Body should be professional and courteous
+- Include appropriate greeting and signature
+- Written from the perspective of Reliant Property Management
+- Sign as "Reliant Property Management Team"
+
+Purpose of the email: {email_purpose}
+
+Format your response exactly like this:
+SUBJECT: [Your subject line here]
+
+[Your email body here]
+"""
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are an experienced commercial property manager writing a professional email."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+            max_tokens=500
+        )
+        
+        # Parse the response text directly without JSON
+        content = response.choices[0].message.content.strip()
+        
+        # Split into subject and body
+        if 'SUBJECT:' in content:
+            parts = content.split('\n', 1)
+            subject = parts[0].replace('SUBJECT:', '').strip()
+            body = parts[1].strip() if len(parts) > 1 else ''
+            return subject, body
+        else:
+            print("Error: Response not in expected format")
+            return '', ''
+            
+    except Exception as e:
+        print(f"Error drafting email: {e}")
+        return '', ''
+
+def review_draft_email(subject, body):
+    """Allow user to review and approve the drafted email"""
+    print("\nDrafted Email:")
+    print("-" * 50)
+    print(f"Subject: {subject}")
+    print("-" * 50)
+    print(body)
+    print("-" * 50)
+    
+    while True:
+        response = input("\nIs this email draft acceptable? (yes/no): ").lower().strip()
+        if response in ['y', 'yes']:
+            return True
+        elif response in ['n', 'no']:
+            return False
+        else:
+            print("Please answer 'yes' or 'no'")
+
+# Update the main test loop
 if __name__ == "__main__":
+    print("Loading data from Google Sheets...")
     tenant_data, vendor_data = get_sheets_data()
+    print("Data loaded successfully!")
 
     while True:
-        user_input = input("\nEnter your request (or 'quit' to exit): ")
+        print("\n" + "="*50)
+        user_input = input("\nDescribe which emails you need (or 'quit' to exit): ")
         if user_input.lower() == 'quit':
             break
 
-        emails = ask_gpt_for_emails(user_input, tenant_data, vendor_data)
-        print("\nGPT's matching emails:")
-        print(emails)
+        final_emails = get_emails_with_verification(user_input, tenant_data, vendor_data)
+        if final_emails:
+            print("\nFinal selected emails:")
+            for email in final_emails:
+                print(f"- {email}")
+            
+            # New email drafting section
+            while True:
+                email_purpose = input("\nWhat type of email would you like me to draft for you? ")
+                subject, body = draft_email_content(email_purpose)
+                
+                if subject and body and review_draft_email(subject, body):
+                    # Prepare to send the email
+                    recipients = ", ".join(final_emails)
+                    send_confirmation = input("\nWould you like to send this email now? (yes/no): ")
+                    if send_confirmation.lower() in ['y', 'yes']:
+                        for recipient in final_emails:
+                            if send_email(recipient, subject, body):
+                                print(f"Email sent successfully to {recipient}")
+                            else:
+                                print(f"Failed to send email to {recipient}")
+                    break
+                else:
+                    retry = input("\nWould you like me to draft a different version? (yes/no): ")
+                    if retry.lower() not in ['y', 'yes']:
+                        break

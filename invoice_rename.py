@@ -127,15 +127,26 @@ def extract_text_from_image(image_path):
     return response.full_text_annotation.text.strip()
 
 def determine_property_code(text):
-    """Use 'CODE' sheet for property codes."""
+    """
+    Use 'CODE' sheet for property codes.
+    Column C is weighted 5x more heavily than other columns.
+    """
     codes = sheet_code.get_all_values()[1:]  # Skip header row
     max_matches = 0
     best_code = "Unknown"
 
     for row in codes:
         property_code = row[0]  # Column A
-        keywords = row[1:]  # Columns B-I
-        matches = sum(text.lower().count(keyword.lower()) for keyword in keywords if keyword)
+        keywords = row[1:]      # Columns B-I
+        
+        # Calculate matches with Column C weighted 5x
+        matches = 0
+        for i, keyword in enumerate(keywords):
+            if keyword and keyword.lower() in text.lower():
+                if i == 1:  # Column C (index 1 since we started from B)
+                    matches += 5  # Weight Column C matches 5x more
+                else:
+                    matches += 1
 
         if matches > max_matches:
             max_matches = matches
