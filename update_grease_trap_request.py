@@ -1,7 +1,7 @@
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -88,18 +88,25 @@ def initialize_sheets_service():
         print(f"Error initializing sheets service: {e}")
         return None
 
-def get_email_from_entry(service, row_number):
-    """Get email from Entry sheet for corresponding row"""
+def get_email_from_entry(service, tenant_row_number):
+    """Get email from Entry sheet for corresponding row, adjusting for offset"""
     try:
-        # Note: row_number + 1 to shift reference by one row
-        range_name = f'Entry!J{row_number + 1}'
+        # Add 2 to the tenant row number to get the corresponding Entry row
+        # (Tenant row 59 maps to Entry row 61)
+        entry_row_number = tenant_row_number + 2
+        
+        range_name = f'Entry!J{entry_row_number}'
         result = service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID,
             range=range_name
         ).execute()
         
         values = result.get('values', [])
-        return values[0][0] if values and values[0] else 'N/A'
+        if values and values[0]:
+            return values[0][0]
+        else:
+            print(f"No email found in Entry sheet row {entry_row_number}")
+            return 'N/A'
     except Exception as e:
         print(f"Error getting email from Entry sheet: {e}")
         return 'N/A'
@@ -112,6 +119,30 @@ def format_date_for_display(date_str):
         return date_obj.strftime('%B %d, %Y')
     except ValueError:
         return date_str if date_str else 'N/A'
+
+def parse_last_service_date(date_str):
+    """Parse MMDDYY date string to datetime object"""
+    try:
+        if not date_str or date_str == 'N/A':
+            return None
+        # Convert MMDDYY to datetime
+        return datetime.strptime(date_str, '%m%d%y')
+    except ValueError:
+        print(f"Invalid date format: {date_str}")
+        return None
+
+def is_service_overdue(last_service_date, days_threshold=60):
+    """Check if service is overdue by comparing to current date"""
+    if not last_service_date:
+        # If no date, consider it overdue
+        return True
+        
+    today = datetime.now()
+    # Calculate threshold date (today - 60 days)
+    threshold_date = today - timedelta(days=days_threshold)
+    
+    # If last service is before threshold, it's overdue
+    return last_service_date <= threshold_date
 
 def format_email_content(template, tenant_name, tenant_address, last_service):
     """Format the email template with tenant's information"""
@@ -167,6 +198,7 @@ def get_grease_trap_data(service, mode=1, tenant_names=None):
         print("===================")
         
         processed_count = 0
+        skipped_recent_service = 0
         
         # Create a list to store all email data
         emails_to_send = []
@@ -190,9 +222,16 @@ def get_grease_trap_data(service, mode=1, tenant_names=None):
                         )
                         if not tenant_matches:
                             continue
+                    elif mode == 1:
+                        # For mode 1 (all tenants), also check if service is overdue
+                        last_service_date = parse_last_service_date(last_service)
+                        if not is_service_overdue(last_service_date):
+                            print(f"Skipping {tenant_name} - service performed within last 60 days")
+                            skipped_recent_service += 1
+                            continue
 
                     processed_count += 1
-                    # Get corresponding email from Entry sheet
+                    # Get corresponding email from Entry sheet with the fixed offset
                     tenant_email = get_email_from_entry(service, i)
                     
                     # Format email content
@@ -224,6 +263,8 @@ def get_grease_trap_data(service, mode=1, tenant_names=None):
         if emails_to_send:
             print("\nEmail Batch Preview:")
             print("===================")
+            print(f"Skipped {skipped_recent_service} tenants with service in the past 60 days")
+            
             for idx, email_data in enumerate(emails_to_send, 1):
                 print(f"\nEmail {idx} of {len(emails_to_send)}:")
                 print(f"To: {email_data['tenant_name']} <{email_data['tenant_email']}>")
@@ -263,7 +304,9 @@ def get_grease_trap_data(service, mode=1, tenant_names=None):
             if mode == 2:
                 print("\nNo matching tenants found with grease trap requirements.")
             else:
-                print("\nNo tenants found with grease trap requirements.")
+                print("\nNo tenants found with grease trap requirements requiring notification.")
+                if skipped_recent_service > 0:
+                    print(f"({skipped_recent_service} tenants skipped due to recent service)")
 
     except Exception as e:
         print(f"Error reading grease trap data: {e}")
@@ -278,7 +321,7 @@ def main():
     # Mode selection
     while True:
         print("\nSelect mode:")
-        print("1. Process all tenants")
+        print("1. Process all tenants (with date filtering)")
         print("2. Process specific tenants")
         try:
             mode = int(input("Enter mode (1 or 2): "))
