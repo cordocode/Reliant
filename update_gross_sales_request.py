@@ -24,7 +24,9 @@ We're missing [Cycles] [Frequency] gross sales reports for [Property Address].
 
 Please send the outstanding reports, signed by an officer, to bring your account current.
 
-Best regards,"""
+Best regards,
+
+Reliant"""
 
 # Email Configuration
 SENDER_EMAIL = os.getenv('sender_email')
@@ -44,8 +46,9 @@ def initialize_sheets_service():
 def get_email_from_entry(service, row_number):
     """Get email from Entry sheet for corresponding row"""
     try:
-        # Note: row_number + 1 to shift reference by one row
-        range_name = f'Entry!J{row_number + 1}'
+        # Add +2 to adjust for the offset between TENANT and ENTRY sheets
+        # This ensures that row 58 on TENANT sheet corresponds to row 60 on ENTRY sheet
+        range_name = f'Entry!J{row_number + 2}'
         result = service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID,
             range=range_name
@@ -108,6 +111,12 @@ def format_frequency(frequency, for_subject=False):
 def format_email_content(tenant_name, property_address, cycles, frequency):
     """Format the email template with tenant's information"""
     try:
+        # Ensure all parameters are strings to prevent NoneType errors
+        tenant_name = str(tenant_name) if tenant_name else "Tenant"
+        property_address = str(property_address) if property_address else "your property"
+        cycles = str(cycles) if cycles else "missing"
+        frequency = str(frequency) if frequency else "regular"
+        
         # Use the constant template directly instead of reading from file
         content = GROSS_SALES_TEMPLATE.replace("[Tenant Name]", tenant_name)
         content = content.replace("[Property Address]", property_address)
@@ -116,7 +125,7 @@ def format_email_content(tenant_name, property_address, cycles, frequency):
         return content
     except Exception as e:
         print(f"Error formatting email: {e}")
-        return None
+        return "We're missing gross sales reports for your property. Please send the outstanding reports to bring your account current."
 
 def calculate_cycles(frequency, start_date, last_record_date, today_date):
     """Calculate number of missed reporting cycles
@@ -194,6 +203,19 @@ def get_tenant_names():
 def send_email(recipient_email, subject, body):
     """Send email using configured SMTP server"""
     try:
+        # Validate email content
+        if not recipient_email:
+            print("Missing recipient email")
+            return False
+        
+        if not body:
+            print("Missing email body")
+            return False
+            
+        # Ensure subject is a string
+        if not subject:
+            subject = "Gross Sales Reports"
+        
         # Create message
         message = MIMEMultipart()
         message['From'] = SENDER_EMAIL
@@ -321,11 +343,14 @@ def get_gross_sales_data(service, mode=1, tenant_names=None):
                 
                 tenant_email = get_email_from_entry(service, i)
                 
-                # Format email content
+                # Validate cycles before formatting
+                cycles_str = str(cycles) if cycles else "1"
+                
+                # Format email content with validation
                 email_content = format_email_content(
                     tenant_name,
                     tenant_address,
-                    cycles,
+                    cycles_str,
                     frequency
                 )
                 
@@ -334,19 +359,23 @@ def get_gross_sales_data(service, mode=1, tenant_names=None):
                 
                 # Instead of sending immediately, store the email data
                 if tenant_email != 'N/A':
-                    emails_to_send.append({
-                        'tenant_name': tenant_name,
-                        'tenant_email': tenant_email,
-                        'subject': subject,
-                        'content': email_content,
-                        'row': i,
-                        'address': tenant_address,
-                        'frequency': frequency,
-                        'start_date': start_date_str,
-                        'last_date': last_record_str,
-                        'cycles': cycles,
-                        'is_past_due': True  # Always true now
-                    })
+                    # Only add to emails list if we have valid content
+                    if email_content:
+                        emails_to_send.append({
+                            'tenant_name': tenant_name,
+                            'tenant_email': tenant_email,
+                            'subject': subject,
+                            'content': email_content,
+                            'row': i,
+                            'address': tenant_address,
+                            'frequency': frequency,
+                            'start_date': start_date_str,
+                            'last_date': last_record_str,
+                            'cycles': cycles,
+                            'is_past_due': True  # Always true now
+                        })
+                    else:
+                        print(f"Failed to generate email content for {tenant_name}")
                 else:
                     print(f"No valid email found for {tenant_name}")
                 
